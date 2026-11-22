@@ -1,0 +1,35 @@
+name: sync
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "上傳到 Notion"
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 2 * 3-4 1"
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q playwright openpyxl requests
+      - run: python -m playwright install --with-deps chromium
+      - run: sudo apt-get update -q && sudo apt-get install -y -q xvfb
+      - name: Run python main.py
+        run: xvfb-run -a python main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chubb-excel
+          path: "*.xlsx"
+          if-no-files-found: error
+      - name: Upload to Notion
+        if: github.event_name == 'schedule' || inputs.upload
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_URL: ${{ secrets.NOTION_DATABASE_URL }}
+        run: python notion_upload.py
