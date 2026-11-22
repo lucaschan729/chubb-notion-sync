@@ -1,0 +1,17 @@
+name: probe
+on:
+  workflow_dispatch:
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: sudo apt-get update -q && sudo apt-get install -y -q xvfb
+      - name: Run python probe.py
+        run: xvfb-run -a python probe.py
