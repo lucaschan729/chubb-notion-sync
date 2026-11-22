@@ -1,106 +1,74 @@
 import re
+from collections import Counter
 from playwright.sync_api import sync_playwright
 
 URL = "https://www.chubblife.com.hk/zh/customer-service/fulfillment-ratios-of-dividend.html"
-TRACK = re.compile(r"google|doubleclick|facebook|adsrvr|linkedin|yimg|omtrdc|analytics|demdex", re.I)
-SKIP_KIND = ("image", "font", "stylesheet", "media")
-NAMES = ["安達開創未來儲蓄計劃", "智策人生", "星鑽"]
+CASES = [
+    ("「星鑽」儲蓄壽險計劃", "HKD"),
+    ("「星鑽」儲蓄壽險計劃", "USD"),
+    ("安達開創未來儲蓄計劃II", "USD"),
+    ("「智策人生」儲蓄保障計劃", "HKD"),
+    ("安達靈「活」延期年金計劃", "USD"),
+]
+PCT = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*%\s*$")
 
-JS_SCRIPT_URLS = r"""() => Array.from(document.querySelectorAll('script[src]')).map(s => s.src)
-  .filter(x => /chubblife\.com\.hk/.test(x) && !/jquery|granite|vue@|accordion/i.test(x))"""
-
-JS_FETCH = r"""async (u) => {
-  try { const r = await fetch(u); return await r.text(); } catch (e) { return 'ERR ' + e; }
+JS_DATA = r"""() => {
+  const el = document.querySelector('#fulfillment-section');
+  const vm = el && el.__vue__;
+  if (!vm) return null;
+  return JSON.parse(JSON.stringify({
+    keys: Object.keys(vm.$data),
+    list: vm.$data.fulfillmentSeriesList,
+    data: vm.$data.data}));
 }"""
 
-JS_VUE = r"""() => {
-  const out = [];
-  let n = document.querySelector('#fulfillment-section');
-  for (let d = 0; n && d < 8; d++, n = n.parentElement) {
-    if (!n.__vue__) continue;
-    const vm = n.__vue__;
-    const data = vm.$data || {};
-    const sizes = Object.keys(data).map(k => {
-      let len = -1;
-      try { len = (JSON.stringify(data[k]) || '').length; } catch (e) {}
-      return k + '（' + (Array.isArray(data[k]) ? '陣列 ' + data[k].length + ' 項' : typeof data[k]) + '，' + len + ' 字）';
-    });
-    let json = '';
-    try { json = JSON.stringify(data); } catch (e) { json = 'ERR ' + e; }
-    out.push({where: n.tagName + '#' + n.id, sizes: sizes, size: json.length, head: json.slice(0, 3500),
-              methods: Object.keys(vm.$options.methods || {}),
-              computed: Object.keys(vm.$options.computed || {})});
-  }
-  return out;
+JS_SCRIPT = r"""async () => {
+  const s = Array.from(document.querySelectorAll('script[src]')).map(x => x.src)
+    .find(x => /hk-zh\.js/.test(x));
+  if (!s) return null;
+  try { const r = await fetch(s); return {url: s, text: await r.text()}; }
+  catch (e) { return {url: s, text: 'ERR ' + e}; }
 }"""
 
-JS_PICK = r"""(idx) => {
-  const s = document.querySelector('select[name="fulfillment-radios-type"]');
-  if (!s || idx >= s.options.length) return null;
-  s.selectedIndex = idx;
+JS_SET = r"""(a) => {
+  const s = document.querySelectorAll('#fulfillment-section select')[a[0]];
+  if (!s) return '找不到選單';
+  const i = Array.from(s.options).findIndex(o => o.value === a[1]);
+  if (i < 0) return '找不到選項';
+  if (s.options[i].disabled) return '選項已停用';
+  s.selectedIndex = i;
   s.dispatchEvent(new Event('input', {bubbles: true}));
   s.dispatchEvent(new Event('change', {bubbles: true}));
-  return (s.options[idx].textContent || '').replace(/\s+/g, ' ').trim();
+  return 'ok';
 }"""
 
-JS_SECTION = r"""() => {
+JS_CLICK = r"""() => {
+  const b = document.querySelector('#fulfillment-section .search-btn.search');
+  if (!b) return '找不到搜尋按鈕';
+  b.click();
+  return 'ok';
+}"""
+
+JS_STATE = r"""() => {
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
-  const sec = document.querySelector('#fulfillment-section');
-  if (!sec) return null;
-  const c = sec.cloneNode(true);
-  c.querySelectorAll('select').forEach(s =>
-    Array.from(s.options).forEach((o, i) => { if (i > 2) o.remove(); }));
+  const el = document.querySelector('#fulfillment-section');
+  if (!el) return null;
+  const d = el.__vue__ ? el.__vue__.$data : {};
+  let result = '';
+  try { result = JSON.stringify(d.result) || ''; } catch (e) { result = 'ERR ' + e; }
+  const copy = el.cloneNode(true);
+  copy.querySelectorAll('select').forEach(s =>
+    Array.from(s.options).forEach((o, i) => { if (i > 1) o.remove(); }));
   return {
-    html: c.outerHTML.replace(/\s+/g, ' ').slice(0, 7000),
-    text: clean(c.textContent).slice(0, 3000),
-    selects: Array.from(sec.querySelectorAll('select')).map(s =>
-      (s.name || s.id || '?') + '：' + s.options.length + ' 項｜' +
-      Array.from(s.options).slice(0, 6).map(o =>
-        clean(o.textContent) + '=' + o.value + (o.disabled ? '(停用)' : '')).join('｜')),
-    controls: Array.from(sec.querySelectorAll('input, button, a, label')).slice(0, 30).map(e =>
-      e.tagName + '｜type=' + (e.type || '') + '｜name=' + (e.name || '') + '｜value=' +
-      (e.value || '') + '｜' + clean(e.textContent).slice(0, 60)),
-    tables: Array.from(sec.querySelectorAll('table')).map(t => ({
-      rows: t.rows.length,
-      cols: Math.max(0, ...Array.from(t.rows).map(r => r.cells.length)),
-      text: clean(t.textContent).slice(0, 1800)})),
-    all_tables: document.querySelectorAll('table').length,
-    links: Array.from(sec.querySelectorAll('a[href]')).slice(0, 20).map(a =>
-      clean(a.textContent).slice(0, 60) + '｜' + a.href)
+    series: d.fulfillmentSeries, currency: d.currency, confirm: d.currencyConfirm,
+    remarks: d.showRemarks, result: result,
+    tables: Array.from(el.querySelectorAll('table')).map(t =>
+      Array.from(t.rows).map(r => Array.from(r.cells).map(x =>
+        clean(x.textContent) + (x.colSpan > 1 ? '〔跨' + x.colSpan + '欄〕' : '') +
+        (x.rowSpan > 1 ? '〔跨' + x.rowSpan + '行〕' : '')))),
+    text: clean(copy.textContent).slice(0, 6000),
+    html: copy.outerHTML.replace(/\s+/g, ' ').slice(0, 14000)
   };
-}"""
-
-JS_CHOICES = r"""() => {
-  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
-  const sec = document.querySelector('#fulfillment-section');
-  if (!sec) return {kind: 'none', labels: [], idx: []};
-  const sels = Array.from(sec.querySelectorAll('select'));
-  if (sels.length >= 2) {
-    const s = sels[1];
-    const idx = Array.from(s.options).map((o, i) => i)
-      .filter(i => !s.options[i].disabled && s.options[i].value !== '');
-    return {kind: 'select', idx: idx, labels: idx.map(i => clean(s.options[i].textContent))};
-  }
-  const radios = Array.from(sec.querySelectorAll('input[type=radio]'));
-  if (radios.length) {
-    return {kind: 'radio', idx: radios.map((r, i) => i),
-            labels: radios.map(r => r.value || clean((r.closest('label') || r.parentElement).textContent))};
-  }
-  return {kind: 'none', labels: [], idx: []};
-}"""
-
-JS_APPLY = r"""(a) => {
-  const sec = document.querySelector('#fulfillment-section');
-  if (a[0] === 'select') {
-    const s = sec.querySelectorAll('select')[1];
-    s.selectedIndex = a[1];
-    s.dispatchEvent(new Event('input', {bubbles: true}));
-    s.dispatchEvent(new Event('change', {bubbles: true}));
-    return s.value;
-  }
-  const r = sec.querySelectorAll('input[type=radio]')[a[1]];
-  r.click();
-  return r.value;
 }"""
 
 
@@ -119,43 +87,61 @@ def load(ctx):
     return page
 
 
-def show_vue(page, head):
-    try:
-        items = page.evaluate(JS_VUE)
-    except Exception as e:
-        print("   讀取 Vue 資料失敗：%s" % short(e))
-        return
-    print("   Vue 元件 %d 個" % len(items))
-    for v in items:
-        print("   位置 %s｜資料共 %d 字" % (v["where"], v["size"]))
-        print("      欄位：%s" % "；".join(v["sizes"]))
-        print("      方法：%s" % "、".join(v["methods"]))
-        print("      計算欄位：%s" % "、".join(v["computed"]))
-        print("      資料開頭：%s" % v["head"][:head])
+def show(v):
+    return "/" if v == "不適用" else str(v)
 
 
-def show_section(page, with_html):
-    try:
-        s = page.evaluate(JS_SECTION)
-    except Exception as e:
-        print("   讀取區塊失敗：%s" % short(e))
-        return
-    if not s:
-        print("   找不到 fulfillment-section")
-        return
-    print("   全頁表格 %d 個｜區塊內表格 %d 個｜區塊內連結 %d 個" % (
-        s["all_tables"], len(s["tables"]), len(s["links"])))
-    for x in s["selects"]:
-        print("   選單：%s" % x)
-    for x in s["controls"]:
-        print("   控件：%s" % x)
-    for t in s["tables"]:
-        print("   表格 %d 行 × %d 欄｜%s" % (t["rows"], t["cols"], t["text"]))
-    for x in s["links"]:
-        print("   連結：%s" % x[:300])
-    print("   區塊文字：%s" % s["text"])
-    if with_html:
-        print("   區塊 HTML：%s" % s["html"])
+def dump_data(d):
+    print("   Vue 欄位：%s" % "、".join(d["keys"]))
+    print("   產品清單 %d 個｜資料分組 %d 組（以下「/」代表官網原文「不適用」）" % (
+        len(d["list"]), len(d["data"])))
+    lengths, texts, nums, member = Counter(), Counter(), [], {}
+    for gi, g in enumerate(d["data"], 1):
+        items = g.get("items") or []
+        print("\n   --- 第 %d 組：%s｜%d 個產品｜分組欄位：%s ---" % (
+            gi, g.get("name"), len(items), "、".join(g.keys())))
+        for k, v in g.items():
+            if k not in ("name", "items"):
+                print("   分組的其他欄位 %s：%s" % (k, short(v, 1500)))
+        for it in items:
+            name = it.get("series")
+            member.setdefault(name, []).append(gi)
+            kind = re.sub(r"\s*<br\s*/?>\s*", "", it.get("type") or "")
+            extra = [k for k in it.keys() if k not in ("series", "eng", "type", "currency")]
+            parts = []
+            for cur, vals in (it.get("currency") or {}).items():
+                if vals is None:
+                    parts.append("%s 沒有" % cur)
+                    continue
+                if not isinstance(vals, list):
+                    parts.append("%s 非陣列：%s" % (cur, short(vals, 200)))
+                    continue
+                lengths[len(vals)] += 1
+                for v in vals:
+                    m = PCT.match(str(v))
+                    if m:
+                        nums.append(float(m.group(1)))
+                    else:
+                        texts[str(v)[:120]] += 1
+                parts.append("%s[%d]：%s" % (cur, len(vals), " ".join(show(v) for v in vals)))
+            print("   %s｜%s｜%s%s" % (name, kind, "｜".join(parts),
+                                     "｜其他欄位 " + "、".join(extra) if extra else ""))
+    print("\n   --- 統計 ---")
+    print("   每行數值個數：%s" % "；".join("%d 個 × %d 行" % (k, v) for k, v in sorted(lengths.items())))
+    if nums:
+        print("   百分比 %d 個｜最高 %.2f%%｜最低 %.2f%%｜低於 80%% 的 %d 個｜高於 100%% 的 %d 個" % (
+            len(nums), max(nums), min(nums),
+            len([x for x in nums if x < 80]), len([x for x in nums if x > 100])))
+    print("   非百分比的內容：")
+    for k, v in texts.most_common(30):
+        print("      %d 次｜%s" % (v, k))
+    combo = Counter(tuple(v) for v in member.values())
+    print("   產品所屬分組：%s" % "；".join(
+        "第 %s 組 × %d 個產品" % ("、".join(str(x) for x in k), v) for k, v in sorted(combo.items())))
+    missing = [x for x in d["list"] if x not in member]
+    print("   清單有但資料沒有的產品 %d 個：%s" % (len(missing), "｜".join(missing)))
+    extra = [x for x in member if x not in d["list"]]
+    print("   資料有但清單沒有的產品 %d 個：%s" % (len(extra), "｜".join(extra)))
 
 
 def main():
@@ -166,64 +152,61 @@ def main():
                                   viewport={"width": 1366, "height": 900})
         page = load(ctx)
 
-        print("=== 1. 網站程式檔 ===")
-        for u in page.evaluate(JS_SCRIPT_URLS):
-            text = page.evaluate(JS_FETCH, u)
-            print("   %s｜%d 字" % (u[:200], len(text)))
-            for key in ["fulfil"] + NAMES:
-                hits = [m.start() for m in re.finditer(re.escape(key), text, re.I)]
-                print("      「%s」%d 次" % (key, len(hits)))
-                for pos in hits[:3]:
-                    print("         …%s…" % short(text[max(0, pos - 250):pos + 650], 900))
-            files = sorted(set(re.findall(r"[\w\-./:%]+\.(?:pdf|json|xlsx?|csv)", text, re.I)))
-            print("      檔案路徑 %d 個：%s" % (len(files), "｜".join(files[:30])[:1500]))
-            print("      百分比數字 %d 個" % len(re.findall(r"\d+(?:\.\d+)?\s*%", text)))
+        print("=== 1. 全部資料 ===")
+        d = page.evaluate(JS_DATA)
+        if d:
+            dump_data(d)
+        else:
+            print("   讀不到 Vue 資料")
 
-        print("\n=== 2. 選產品前的 Vue 資料 ===")
-        show_vue(page, 3500)
+        print("\n=== 2. hk-zh.js 的顯示程式碼 ===")
+        s = page.evaluate(JS_SCRIPT)
+        if s:
+            text = s["text"]
+            print("   %s｜%d 字" % (s["url"], len(text)))
+            pos = text.find("showRemarks")
+            start = max(0, pos - 300) if pos >= 0 else max(0, len(text) - 6000)
+            print("   片段（由第 %d 字起）：%s" % (start, short(text[start:start + 6000], 6000)))
+        else:
+            print("   找不到 hk-zh.js")
         page.close()
 
-        first = True
-        for n, idx in enumerate((2, 24, 44), 1):
-            print("\n=== 3.%d 選第 [%d] 項 ===" % (n, idx))
+        for n, (name, cur) in enumerate(CASES, 1):
+            print("\n=== 3.%d %s｜%s ===" % (n, name, cur))
             try:
                 page = load(ctx)
-            except Exception as e:
-                print("   載入失敗：%s" % short(e))
-                continue
-            seen = []
-
-            def on_response(r, seen=seen):
+                print("   選產品：%s" % page.evaluate(JS_SET, [0, name]))
+                page.wait_for_timeout(1500)
+                print("   選貨幣：%s" % page.evaluate(JS_SET, [1, cur]))
+                page.wait_for_timeout(1500)
                 try:
-                    kind = r.request.resource_type
-                    if kind in SKIP_KIND or TRACK.search(r.url):
-                        return
-                    seen.append("%s｜%s｜%s" % (r.status, kind, r.url[:240]))
-                except Exception:
-                    pass
-
-            page.on("response", on_response)
-            try:
-                print("   已選產品：%s" % page.evaluate(JS_PICK, idx))
-                page.wait_for_timeout(2500)
-                print("   --- 選產品後 ---")
-                show_section(page, first)
-                ch = page.evaluate(JS_CHOICES)
-                print("   貨幣選項形式：%s｜%s" % (ch["kind"], "、".join(ch["labels"])))
-                for k, i in enumerate(ch["idx"]):
-                    got = page.evaluate(JS_APPLY, [ch["kind"], i])
-                    page.wait_for_timeout(3000)
-                    print("   --- 選貨幣「%s」後（值 %s）---" % (ch["labels"][k], got))
-                    show_section(page, first and k == 0)
-                    if first and k == 0:
-                        show_vue(page, 2500)
-                print("   期間的請求 %d 個：" % len(seen))
-                for x in seen[:20]:
-                    print("      %s" % x)
+                    page.locator("#fulfillment-section .search-btn.search").click(timeout=5000)
+                    print("   按搜尋：ok")
+                except Exception as e:
+                    print("   按搜尋失敗，改用程式點擊：%s｜%s" % (page.evaluate(JS_CLICK), short(e, 150)))
+                page.wait_for_timeout(3000)
+                st = page.evaluate(JS_STATE)
+                if not st:
+                    print("   找不到 fulfillment-section")
+                    page.close()
+                    continue
+                print("   Vue 狀態：產品 %s｜貨幣 %s｜已確認貨幣 %s｜顯示備註 %s" % (
+                    st["series"], st["currency"], st["confirm"], st["remarks"]))
+                print("   Vue result（%d 字）：%s" % (len(st["result"]), st["result"][:3000]))
+                print("   區塊內表格 %d 個" % len(st["tables"]))
+                for ti, rows in enumerate(st["tables"], 1):
+                    print("   表格 %d（%d 行）：" % (ti, len(rows)))
+                    for r in rows[:30]:
+                        print("      %s" % "｜".join(r)[:1500])
+                print("   區塊文字：%s" % st["text"])
+                if n in (1, 3):
+                    print("   區塊 HTML：%s" % st["html"])
             except Exception as e:
                 print("   操作出錯：%s" % short(e))
-            first = False
-            page.close()
+            try:
+                page.close()
+            except Exception:
+                pass
         browser.close()
     print("\n=== 探查完成 ===")
 
