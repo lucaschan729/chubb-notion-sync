@@ -21,15 +21,14 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - run: sudo apt-get update -q && sudo apt-get install -y -q xvfb
       - name: Run python main.py
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_DATABASE_URL: ${{ secrets.NOTION_DATABASE_URL }}
+          UPLOAD: ${{ (github.event_name == 'schedule' || inputs.upload) && '1' || '0' }}
         run: xvfb-run -a python main.py
       - uses: actions/upload-artifact@v4
         with:
           name: chubb-excel
           path: "*.xlsx"
           if-no-files-found: error
-      - name: Upload to Notion
-        if: github.event_name == 'schedule' || inputs.upload
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_URL: ${{ secrets.NOTION_DATABASE_URL }}
-        run: python notion_upload.py
